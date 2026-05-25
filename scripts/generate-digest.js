@@ -198,6 +198,11 @@ async function sendToFeishu(markdown) {
   const today = getTodayBeijing();
   const cleanMd = markdown.replace(/^#{1,6}\s+(.+)$/gm, '**$1**');
 
+  // 调试:打印实际推送的内容
+  console.log('[DEBUG] markdown 前 200 字符:', JSON.stringify(cleanMd.substring(0, 200)));
+  console.log('[DEBUG] markdown 总长度:', cleanMd.length);
+  console.log('[DEBUG] markdown 后 100 字符:', JSON.stringify(cleanMd.slice(-100)));
+
   const resp = await fetch(FEISHU_WEBHOOK, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
