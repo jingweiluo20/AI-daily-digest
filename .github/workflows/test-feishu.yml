@@ -1,5 +1,30 @@
+name: Test Real Digest
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@v4
       
+      - name: Test 3 - 真实日报 markdown 卡片
+        run: |
+          DIGEST=$(cat digests/2026-05-25.md | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+          curl -X POST "${{ secrets.FEISHU_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"msg_type\":\"interactive\",\"card\":{\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"测试3 真实日报\"},\"template\":\"blue\"},\"elements\":[{\"tag\":\"markdown\",\"content\":\"${DIGEST}\"}]}}"
+          echo ""
+      
+      - name: Test 4 - 真实日报 截前 500 字
+        run: |
+          DIGEST=$(head -c 500 digests/2026-05-25.md | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
+          curl -X POST "${{ secrets.FEISHU_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d "{\"msg_type\":\"interactive\",\"card\":{\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"测试4 截前500字\"},\"template\":\"green\"},\"elements\":[{\"tag\":\"markdown\",\"content\":\"${DIGEST}\"}]}}"
+          echo ""
+
       - name: Test 5 - 用 Node.js 推真实日报(完全复刻正式 workflow)
         env:
           FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
