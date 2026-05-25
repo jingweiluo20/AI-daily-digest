@@ -1,0 +1,22 @@
+name: Test Feishu
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test 1 - Plain text
+        run: |
+          curl -X POST "${{ secrets.FEISHU_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"msg_type":"text","content":{"text":"测试1: 这是一条纯文本测试消息"}}'
+          echo ""
+
+      - name: Test 2 - Simple interactive card
+        run: |
+          curl -X POST "${{ secrets.FEISHU_WEBHOOK }}" \
+            -H 'Content-Type: application/json' \
+            -d '{"msg_type":"interactive","card":{"header":{"title":{"tag":"plain_text","content":"测试2 卡片标题"},"template":"blue"},"elements":[{"tag":"markdown","content":"测试2: 这是卡片正文"}]}}'
+          echo ""
