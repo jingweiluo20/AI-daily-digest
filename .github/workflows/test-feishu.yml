@@ -1,4 +1,4 @@
-name: Test Feishu
+name: Test Real Digest
 
 on:
   workflow_dispatch:
@@ -7,16 +7,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Test 1 - Plain text
+      - uses: actions/checkout@v4
+      
+      - name: Test 3 - 真实日报 markdown 卡片
         run: |
+          DIGEST=$(cat digests/2026-05-25.md | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
           curl -X POST "${{ secrets.FEISHU_WEBHOOK }}" \
             -H 'Content-Type: application/json' \
-            -d '{"msg_type":"text","content":{"text":"测试1: 这是一条纯文本测试消息"}}'
+            -d "{\"msg_type\":\"interactive\",\"card\":{\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"测试3 真实日报\"},\"template\":\"blue\"},\"elements\":[{\"tag\":\"markdown\",\"content\":\"${DIGEST}\"}]}}"
           echo ""
-
-      - name: Test 2 - Simple interactive card
+      
+      - name: Test 4 - 真实日报 截前 500 字
         run: |
+          DIGEST=$(head -c 500 digests/2026-05-25.md | sed 's/"/\\"/g' | sed ':a;N;$!ba;s/\n/\\n/g')
           curl -X POST "${{ secrets.FEISHU_WEBHOOK }}" \
             -H 'Content-Type: application/json' \
-            -d '{"msg_type":"interactive","card":{"header":{"title":{"tag":"plain_text","content":"测试2 卡片标题"},"template":"blue"},"elements":[{"tag":"markdown","content":"测试2: 这是卡片正文"}]}}'
+            -d "{\"msg_type\":\"interactive\",\"card\":{\"header\":{\"title\":{\"tag\":\"plain_text\",\"content\":\"测试4 截前500字\"},\"template\":\"green\"},\"elements\":[{\"tag\":\"markdown\",\"content\":\"${DIGEST}\"}]}}"
           echo ""
