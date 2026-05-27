@@ -170,26 +170,64 @@ async function generateDigest(articles) {
 今日文章：
 ${articleText}`;
 
-  const resp = await fetch(`${LLM_BASE_URL}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${LLM_API_KEY}`
-    },
-    body: JSON.stringify({
-      model: LLM_MODEL,
-      messages: [
-        { role: 'system', content: '你是专业的AI行业分析师，擅长将多篇文章整合为结构清晰的中文日报。输出不要用markdown的#标题格式。' },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 4000,
-      temperature: 0.7
-    })
-  });
+  // 带重试 + 超时的 LLM 调用
+  let result = null;
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[LLM] 第 ${attempt}/${maxRetries} 次尝试...`);
 
-  const result = await resp.json();
-  if (result.choices && result.choices[0]) {
-    return result.choices[0].message.content;
+      // 90 秒超时
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 90000);
+
+      const resp = await fetch(`${LLM_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${LLM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: LLM_MODEL,
+          messages: [
+            { role: 'system', content: '你是专业的AI行业分析师，擅长将多篇文章整合为结构清晰的中文日报。输出不要用markdown的#标题格式。' },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 3000,
+          temperature: 0.7
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeout);
+
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      }
+
+      result = await resp.json();
+      break; // 成功就跳出循环
+
+    } catch (err) {
+      console.log(`[LLM] 第 ${attempt} 次失败: ${err.code || err.message}`);
+      if (attempt === maxRetries) {
+        throw new Error(`LLM 调用 ${maxRetries} 次后仍失败: ${err.message}`);
+      }
+      // 等待 5s, 15s, 45s 后重试
+      const wait = 5000 * Math.pow(3, attempt - 1);
+      console.log(`[LLM] 等待 ${wait/1000}s 后重试...`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+
+  if (result && result.choices && result.choices[0]) {
+    const msg = result.choices[0].message;
+    // 兼容思考模式：content 为空时退回 reasoning_content
+    const content = (msg.content && msg.content.trim()) ? msg.content : (msg.reasoning_content || '');
+    if (!content.trim()) {
+      throw new Error('LLM 返回内容为空: ' + JSON.stringify(result).substring(0, 500));
+    }
+    return content;
   }
   throw new Error('LLM返回异常: ' + JSON.stringify(result));
 }
