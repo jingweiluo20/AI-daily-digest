@@ -11,7 +11,7 @@
 - 所有原始内容的链接
 - 国内在前、海外在后的分区结构,适合快速阅读
 
-## 安装(作为 Claude Code / Mira Skill)
+## 安装(作为 Claude Code Skill)
 
 > ⚠️ 安装时务必使用下方命令,本地文件夹名必须是 `AI-daily-digest`,否则 skill 名字会注册错误。
 
@@ -19,7 +19,7 @@
 git clone https://github.com/jingweiluo20/AI-daily-digest.git ~/.claude/skills/AI-daily-digest
 ```
 
-安装完成后,在 Claude Code / Mira 中输入 `/AI-daily-digest` 即可触发。
+安装完成后,在 Claude Code 中输入 `/AI-daily-digest` 即可触发。
 
 ## 自动化(GitHub Actions)
 
