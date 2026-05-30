@@ -1,0 +1,315 @@
+const RSSParser = require('rss-parser');
+const fetch = require('node-fetch');
+const fs = require('fs');
+const path = require('path');
+
+const parser = new RSSParser();
+
+const LLM_API_KEY = process.env.LLM_API_KEY;
+const LLM_BASE_URL = process.env.LLM_BASE_URL || 'https://api.deepseek.com/v1';
+const LLM_MODEL = process.env.LLM_MODEL || 'deepseek-chat';
+const FEISHU_WEBHOOK = process.env.FEISHU_WEBHOOK;
+const WERSS_BASE_URL = process.env.WERSS_BASE_URL || 'https://we-mp-rss-production-d40f.up.railway.app';
+
+function getTodayBeijing() {
+  const now = new Date();
+  const beijing = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+  return beijing.toISOString().split('T')[0];
+}
+
+function isRecent(dateStr) {
+  if (!dateStr) return true;
+  const articleDate = new Date(dateStr);
+  const now = new Date();
+  return (now - articleDate) < 24 * 60 * 60 * 1000;
+}
+
+async function fetchArticleContent(url) {
+  try {
+    if (!url || !url.includes('mp.weixin.qq.com')) return null;
+    const resp = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      timeout: 10000
+    });
+    const html = await resp.text();
+    const match = html.match(/id="js_content"[^>]*>([\s\S]*?)<\/div>/);
+    if (match) {
+      let text = match[1].replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+      return text.substring(0, 3000);
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// 抓取微信公众号
+async function fetchWechatFeeds() {
+  const feedFile = path.join(__dirname, '..', 'feed-wechat.json');
+  const feeds = JSON.parse(fs.readFileSync(feedFile, 'utf-8'));
+  const articles = [];
+
+  for (const source of feeds) {
+    try {
+      const feed = await parser.parseURL(source.rss);
+      for (const item of (feed.items || []).slice(0, 5)) {
+        if (!isRecent(item.pubDate)) continue;
+        const content = await fetchArticleContent(item.link);
+        articles.push({
+          type: 'wechat',
+          source: source.name,
+          title: item.title || '无标题',
+          link: item.link || '',
+          summary: content || item.contentSnippet || item.content || '无摘要',
+          date: item.pubDate || ''
+        });
+      }
+    } catch (e) {
+      console.log(`[WARN] 抓取 ${source.name} 失败: ${e.message}`);
+    }
+  }
+  return articles;
+}
+
+// 从 zarazhangrui/follow-builders 的 feed-x.json 抓取推文
+async function fetchBuildersTweets() {
+  const articles = [];
+  try {
+    const resp = await fetch('https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-x.json');
+    const data = await resp.json();
+    const users = data.x || [];
+
+    for (const user of users) {
+      for (const tweet of (user.tweets || []).slice(0, 3)) {
+        if (!tweet.text || tweet.text.length < 20) continue;
+        articles.push({
+          type: 'builders',
+          source: `${user.name} (@${user.handle})`,
+          title: tweet.text.substring(0, 80) + (tweet.text.length > 80 ? '...' : ''),
+          link: tweet.url || `https://x.com/${user.handle}/status/${tweet.id}`,
+          summary: tweet.text,
+          date: tweet.createdAt || ''
+        });
+      }
+    }
+  } catch (e) {
+    console.log(`[WARN] 抓取 builders tweets 失败: ${e.message}`);
+  }
+  return articles;
+}
+
+// 从 feed-podcasts.json 抓取播客
+async function fetchBuildersPodcasts() {
+  const articles = [];
+  try {
+    const resp = await fetch('https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json');
+    const data = await resp.json();
+    const podcasts = data.podcasts || [];
+
+    for (const ep of podcasts.slice(0, 10)) {
+      articles.push({
+        type: 'builders',
+        source: ep.podcastName || ep.source || 'Podcast',
+        title: ep.title || '无标题',
+        link: ep.url || ep.link || '',
+        summary: (ep.description || ep.summary || '').substring(0, 500),
+        date: ep.publishedAt || ep.date || ''
+      });
+    }
+  } catch (e) {
+    console.log(`[WARN] 抓取 builders podcasts 失败: ${e.message}`);
+  }
+  return articles;
+}
+
+async function generateDigest(articles) {
+  const wechatList = articles.filter(a => a.type === 'wechat');
+  const buildersList = articles.filter(a => a.type === 'builders');
+
+  const formatArticles = (list) => list.map((a, i) =>
+    `${i + 1}. [来源:${a.source}] 标题:${a.title}\n   链接: ${a.link}\n   内容: ${a.summary}`
+  ).join('\n\n');
+
+  const articleText = `=== 第一部分：国内AI资讯 ===\n${formatArticles(wechatList)}\n\n=== 第二部分：海外AI圈动态（推文+播客） ===\n${formatArticles(buildersList)}`;
+
+  const prompt = `你是一个AI行业日报编辑。请根据以下今日文章列表，生成一份中文日报摘要。
+
+【内容筛选规则】
+0. **过滤广告**：广告类型直接丢弃，不要出现在日报里：
+1. **海外部分严格限 5 条**：从所有海外推文+播客中，由你判断挑出最重要的 5 条， 同一事件多人讨论也算一条
+   - **优先级**：新产品/新版本发布 > 重大融资/收购 > 重要论文/技术突破 > 行业观点
+
+【合并与展示规则】
+2. **同事件/同主题必须合并为一条**：
+   - 同一公司同一动作（如某模型发布、某轮融资）→ 合并
+   - 但**所有来源链接都要保留**，全部附在该条末尾
+3. **链接渲染格式**：
+   - 国内（微信）：链接文字用**公众号名称**，格式 \`[公众号名](链接)\`，多个来源用空格分隔
+     例：- DeepSeek 开源 V4，长上下文 256k [晚点LatePost](url1) [机器之心](url2) [量子位](url3)
+   - 海外（推文/播客）：链接文字用**原文**，格式 \`[原文](链接)\`，多个来源用空格分隔
+     例：- OpenAI 发布 GPT-5.5 [原文](url1) [原文](url2)
+4. **官方公众号**：
+   - DeepSeek、智谱、月之暗面 Kimi、Minimax、豆包、通义千问、腾讯混元官方号文章必须展示，且置于信息上方
+
+
+【格式规则】
+5. 不要用#号标题，用**加粗文字**作为分类标题
+6. 按主题分类（如：大模型动态、创业融资、产品发布、行业观点、技术前沿等）
+7. 每条新闻用 1-2 句话总结核心信息，尽量简洁直接
+8. 每条用 - 开头作为列表项
+9. 开头写一段今日概览（3-5 句话总结今天最重要的事）
+10. 分类之间用空行隔开
+11. 语言简洁有力，适合快速阅读
+
+【结构规则】
+12. 文章分为两个部分，请严格按顺序输出：
+    - 先输出第一部分（国内资讯）的完整摘要
+    - 再输出第二部分（海外动态）的摘要，**最多 5 条**
+    - 两部分之间用 --- 分割线隔开
+
+今日文章：
+${articleText}
+
+【最重要】直接输出最终日报正文,第一行必须以"今日概览"开头。
+严禁输出"分析请求"、"分析输入数据"、"挑选过程"、"草稿"、"步骤1/2/3"、
+"选项A/B/C"、"自我修正"、"让我们..." 等任何思考过程或元说明,
+也不要复述上面的规则。只要成品日报本身。`;
+
+  // 带重试 + 超时的 LLM 调用
+  let result = null;
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[LLM] 第 ${attempt}/${maxRetries} 次尝试...`);
+
+      // 90 秒超时
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 90000);
+
+      const resp = await fetch(`${LLM_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${LLM_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: LLM_MODEL,
+          messages: [
+            { role: 'system', content: '你是专业的AI行业分析师，擅长将多篇文章整合为结构清晰的中文日报。输出不要用markdown的#标题格式。严禁输出任何"分析请求/分析输入/挑选/草稿/选项A/选项B/自我修正/让我们"等思考过程或元说明，只输出最终日报正文，第一行必须是"今日概览"。' },
+            { role: 'user', content: prompt }
+          ],
+          max_tokens: 4000,
+          temperature: 0.7,
+          // 关掉 GLM-4.6/4.7/5.1 等 thinking 模型的思考模式，避免 reasoning_content 污染输出
+          thinking: { type: 'disabled' }
+        }),
+        signal: controller.signal
+      });
+
+      clearTimeout(timeout);
+
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+      }
+
+      result = await resp.json();
+      break; // 成功就跳出循环
+
+    } catch (err) {
+      console.log(`[LLM] 第 ${attempt} 次失败: ${err.code || err.message}`);
+      if (attempt === maxRetries) {
+        throw new Error(`LLM 调用 ${maxRetries} 次后仍失败: ${err.message}`);
+      }
+      // 等待 5s, 15s, 45s 后重试
+      const wait = 5000 * Math.pow(3, attempt - 1);
+      console.log(`[LLM] 等待 ${wait/1000}s 后重试...`);
+      await new Promise(r => setTimeout(r, wait));
+    }
+  }
+
+  if (result && result.choices && result.choices[0]) {
+    const msg = result.choices[0].message;
+    // 只用 content；reasoning_content 是思考过程,绝不作为正文输出
+    const content = (msg.content && msg.content.trim()) ? msg.content : '';
+    if (!content.trim()) {
+      throw new Error('LLM 返回内容为空(可能 thinking 模式未关): ' + JSON.stringify(result).substring(0, 500));
+    }
+    // 污染检测:命中思考过程关键词就当失败,避免把草稿推到飞书
+    if (/分析请求|分析输入数据|挑选并整合|撰写日报草稿|选项\s*[ABCDE]|自我修正|让我们(挑选|回顾|看看)/.test(content)) {
+      throw new Error('LLM 输出含思考过程,疑似 reasoning 泄漏: ' + content.substring(0, 200));
+    }
+    return content;
+  }
+  throw new Error('LLM返回异常: ' + JSON.stringify(result));
+}
+
+async function sendToFeishu(markdown) {
+  const today = getTodayBeijing();
+  const cleanMd = markdown.replace(/^#{1,6}\s+(.+)$/gm, '**$1**');
+
+  // 调试:打印实际推送的内容
+  console.log('[DEBUG] markdown 前 200 字符:', JSON.stringify(cleanMd.substring(0, 200)));
+  console.log('[DEBUG] markdown 总长度:', cleanMd.length);
+  console.log('[DEBUG] markdown 后 100 字符:', JSON.stringify(cleanMd.slice(-100)));
+
+  const resp = await fetch(FEISHU_WEBHOOK, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      msg_type: 'interactive',
+      card: {
+        header: {
+          title: { tag: 'plain_text', content: `AI日报 ${today}` },
+          template: 'blue'
+        },
+        elements: [
+          {
+            tag: 'markdown',
+            content: cleanMd.substring(0, 4000)
+          }
+        ]
+      }
+    })
+  });
+
+  const result = await resp.json();
+  console.log('[飞书推送结果]', JSON.stringify(result));
+}
+
+async function main() {
+  console.log(`[${getTodayBeijing()}] 开始生成AI日报...`);
+
+  const [wechatArticles, buildersTweets, buildersPodcasts] = await Promise.all([
+    fetchWechatFeeds(),
+    fetchBuildersTweets(),
+    fetchBuildersPodcasts()
+  ]);
+
+  const allArticles = [...wechatArticles, ...buildersTweets, ...buildersPodcasts];
+  console.log(`[INFO] 共抓取 ${allArticles.length} 条（微信${wechatArticles.length} + 推文${buildersTweets.length} + 播客${buildersPodcasts.length}）`);
+
+  if (allArticles.length === 0) {
+    console.log('[WARN] 今日无内容，跳过生成');
+    return;
+  }
+
+  const digest = await generateDigest(allArticles);
+  console.log('[INFO] 日报生成完成');
+
+  const digestDir = path.join(__dirname, '..', 'digests');
+  if (!fs.existsSync(digestDir)) fs.mkdirSync(digestDir, { recursive: true });
+  const filePath = path.join(digestDir, `${getTodayBeijing()}.md`);
+  fs.writeFileSync(filePath, digest);
+  console.log(`[INFO] 已保存到 ${filePath}`);
+
+  if (FEISHU_WEBHOOK) {
+    await sendToFeishu(digest);
+  } else {
+    console.log('[WARN] 未配置FEISHU_WEBHOOK，跳过推送');
+  }
+}
+
+main().catch(e => {
+  console.error('[ERROR]', e);
+  process.exit(1);
+});
